@@ -22,6 +22,18 @@ Logging a flight from an email / booking confirmation / boarding pass:
   3. Call check_duplicate(date, origin, destination) and skip if it reports a match.
   4. Call add_flight with the resolved fields.
 Dates are YYYY-MM-DD, times are HH:MM (24h, local). origin/destination are airport codes.
+
+Companions (family members / travel partners):
+  - add_flight accepts a `companions` list of names; or attach them afterwards with
+    set_flight_companions (one flight) / add_flight_companions (many flights at once).
+  - New names auto-create a profile. list_companions and get_companion show who you fly
+    with and every flight you've shared with them.
+
+Enriching a flight (when logging, or later on an existing flight):
+  - Plane details (airplane type like "B738", tail_number) and flight_number can be passed
+    to add_flight, or added to an existing flight with update_flight.
+  - Frequent flyer: attach a loyalty program + membership number (and optional miles /
+    status credits) with set_frequent_flyer; frequent_flyer_summary totals them across flights.
 """
 
 mcp = FastMCP("jetlog", instructions=INSTRUCTIONS, host="0.0.0.0", port=PORT)
@@ -116,6 +128,7 @@ async def add_flight(
     currency: str | None = None,
     rating: int | None = None,
     notes: str | None = None,
+    companions: list[str] | None = None,
 ) -> dict:
     """Add a flight to the log.
 
@@ -128,11 +141,17 @@ async def add_flight(
       purpose:       leisure | business | crew | other
     airline must be a valid airline ICAO code that exists in jetlog (e.g. "UAL",
     "BAW") — resolve it with search_airlines first; free text is rejected.
-    duration is minutes, distance is km. When logging from an email/confirmation,
-    call check_duplicate first. Returns {"id": <new flight id>}.
+    duration is minutes, distance is km. companions is an optional list of family-
+    member / travel-partner names who were on the flight; unknown names auto-create a
+    profile. When logging from an email/confirmation, call check_duplicate first.
+    Returns {"id": <new flight id>}.
     """
-    body = _flight_body(locals())
+    fields = dict(locals())
+    companion_names = fields.pop("companions", None)
+    body = _flight_body(fields)
     new_id = await _req("POST", "/api/flights", json=body)
+    if companion_names:
+        await _req("POST", f"/api/flights/{new_id}/companions", json={"names": companion_names})
     return {"id": new_id}
 
 
@@ -176,6 +195,129 @@ async def delete_flight(flight_id: int) -> dict:
     """Delete a flight by id."""
     result = await _req("DELETE", "/api/flights", params={"id": flight_id})
     return {"deleted": flight_id, "result": result}
+
+
+# ---- Companions (family members / travel partners) ----
+
+@mcp.tool()
+async def list_companions() -> list[dict]:
+    """List saved companions (family members / travel partners), each with how many
+    flights you've taken together, total distance, and the most recent shared flight.
+    """
+    return await _req("GET", "/api/companions", params={"metric": True})
+
+
+@mcp.tool()
+async def get_companion(companion_id: int) -> dict:
+    """Get one companion's profile: stats (flights together, distance, hours, unique
+    airports/countries, first/last flight, top destinations) plus the full list of
+    flights you've shared with them.
+    """
+    return await _req("GET", f"/api/companions/{companion_id}", params={"metric": True})
+
+
+@mcp.tool()
+async def add_companion(name: str, relation: str | None = None, notes: str | None = None) -> dict:
+    """Create a companion profile ahead of time. relation is free text (e.g. spouse,
+    child, parent, friend). Companions are also auto-created whenever you attach a new
+    name to a flight, so this is only needed to pre-register someone.
+    """
+    body: dict = {"name": name}
+    if relation:
+        body["relation"] = relation
+    if notes:
+        body["notes"] = notes
+    return await _req("POST", "/api/companions", json=body)
+
+
+@mcp.tool()
+async def update_companion(
+    companion_id: int,
+    name: str | None = None,
+    relation: str | None = None,
+    notes: str | None = None,
+) -> dict:
+    """Rename a companion or change their relation/notes. Only the fields you pass change."""
+    body: dict = {}
+    for key, value in (("name", name), ("relation", relation), ("notes", notes)):
+        if value is not None:
+            body[key] = value
+    return await _req("PATCH", f"/api/companions/{companion_id}", json=body)
+
+
+@mcp.tool()
+async def delete_companion(companion_id: int) -> dict:
+    """Delete a companion. Unlinks them from all flights but does not delete the flights."""
+    return await _req("DELETE", f"/api/companions/{companion_id}")
+
+
+@mcp.tool()
+async def get_flight_companions(flight_id: int) -> list[dict]:
+    """List the companions attached to a single flight."""
+    return await _req("GET", f"/api/flights/{flight_id}/companions")
+
+
+@mcp.tool()
+async def set_flight_companions(flight_id: int, names: list[str]) -> list[dict]:
+    """Set (replace) the companions on a flight by name. Unknown names auto-create a
+    profile. Pass an empty list to remove all companions from the flight.
+    """
+    return await _req("POST", f"/api/flights/{flight_id}/companions", json={"names": names})
+
+
+@mcp.tool()
+async def add_flight_companions(flight_ids: list[int], names: list[str]) -> dict:
+    """Add the same companions to many flights at once, keeping each flight's existing
+    companions. Unknown names auto-create a profile. Returns {"updated": <count>}.
+    """
+    return await _req("POST", "/api/companions/bulk-assign", json={"ids": flight_ids, "names": names})
+
+
+# ---- Frequent flyer ----
+
+@mcp.tool()
+async def get_frequent_flyer(flight_id: int) -> dict | None:
+    """Get the frequent-flyer entry on a flight (loyalty program, member number, miles,
+    status credits), or null if none is set."""
+    return await _req("GET", f"/api/flights/{flight_id}/frequent-flyer")
+
+
+@mcp.tool()
+async def set_frequent_flyer(
+    flight_id: int,
+    program_name: str,
+    member_number: str | None = None,
+    miles_earned: int = 0,
+    status_credits: int = 0,
+) -> dict:
+    """Add or update the frequent-flyer entry on a flight.
+
+    program_name is the loyalty program (e.g. "United MileagePlus", "Delta SkyMiles")
+    and is required. member_number is your frequent-flyer / membership number.
+    miles_earned and status_credits (elite-qualifying credits) are optional integers.
+    Each flight holds a single entry; calling again replaces it.
+    """
+    body: dict = {
+        "program_name": program_name,
+        "miles_earned": miles_earned,
+        "status_credits": status_credits,
+    }
+    if member_number is not None:
+        body["member_number"] = member_number
+    return await _req("POST", f"/api/flights/{flight_id}/frequent-flyer", json=body)
+
+
+@mcp.tool()
+async def delete_frequent_flyer(flight_id: int) -> dict:
+    """Remove the frequent-flyer entry from a flight."""
+    return await _req("DELETE", f"/api/flights/{flight_id}/frequent-flyer")
+
+
+@mcp.tool()
+async def frequent_flyer_summary() -> dict:
+    """Frequent-flyer totals across all flights: per-program miles, status credits and
+    flight counts, plus overall totals."""
+    return await _req("GET", "/api/frequent-flyer/summary")
 
 
 @mcp.tool()
