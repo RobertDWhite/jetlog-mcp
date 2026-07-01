@@ -127,6 +127,7 @@ async def add_flight(
     cost: float | None = None,
     currency: str | None = None,
     rating: int | None = None,
+    connection: int | None = None,
     notes: str | None = None,
     companions: list[str] | None = None,
 ) -> dict:
@@ -141,7 +142,9 @@ async def add_flight(
       purpose:       leisure | business | crew | other
     airline must be a valid airline ICAO code that exists in jetlog (e.g. "UAL",
     "BAW") — resolve it with search_airlines first; free text is rejected.
-    duration is minutes, distance is km. companions is an optional list of family-
+    duration is minutes, distance is km. connection is the flight id of the onward /
+    connecting flight this leg links to (usually left unset — jetlog auto-detects
+    connections). companions is an optional list of family-
     member / travel-partner names who were on the flight; unknown names auto-create a
     profile. When logging from an email/confirmation, call check_duplicate first.
     Returns {"id": <new flight id>}.
@@ -178,6 +181,7 @@ async def update_flight(
     cost: float | None = None,
     currency: str | None = None,
     rating: int | None = None,
+    connection: int | None = None,
     notes: str | None = None,
 ) -> dict:
     """Update fields on an existing flight. Only the fields you pass are changed.
